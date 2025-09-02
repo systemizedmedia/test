@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>Overage Allocator (CustomerID → Platforms)</title>
+<title>Overage Allocator (CustomerID → Platforms → AM/CSM)</title>
 <style>
   :root{
     --bg:#0b1220;--card:#0f172a;--text:#e5e7eb;--sub:#94a3b8;
@@ -49,12 +49,15 @@
   .platform-chip{display:inline-block;font-size:11px;padding:2px 6px;border-radius:6px;background:#111827;border:1px solid #334155;margin-right:6px}
   .sumrow{display:flex;justify-content:space-between;align-items:center;gap:8px}
   .sticky-actions{position:sticky;bottom:0;background:linear-gradient(180deg,rgba(15,23,42,.5),rgba(15,23,42,.95));backdrop-filter:blur(6px);padding:8px;border:1px solid var(--border);border-radius:10px;margin-top:10px}
+  .tabbar { display:flex; gap:8px; flex-wrap:wrap; margin:12px 0; }
+  .tabbar button { background:#0b1220; border:1px solid #334155; color:var(--sub); padding:8px 12px; border-radius:10px; cursor:pointer; }
+  .tabbar button.active { background:var(--accent); color:white; border-color:transparent; }
 </style>
 </head>
 <body>
 <header>
   <h1>Overage Allocator</h1>
-  <div class="sub">Upload Masterlist (with <span class="kbd">Base_*</span> columns) + Stripe. Match by <span class="kbd">CustomerID</span>. Allocate <em>overage</em> per client & period with custom inputs.</div>
+  <div class="sub">Upload Masterlist (with <span class="kbd">Base_*</span>, AM_* and CSM columns) + Stripe. Match by <span class="kbd">CustomerID</span>. Allocate overage per client & period. AMs get full credit per platform allocation; CSM gets the client's total revenue.</div>
 </header>
 
 <main>
@@ -97,7 +100,12 @@
 
     <section class="card">
       <h2>2) Map Columns</h2>
-      <div class="hint">We auto-detect platforms from any columns named <strong>Base_*</strong> (e.g., Base_FB, Base_IG, Base_YT). Optional default weights: <strong>OverageW_*</strong>.</div>
+      <div class="hint">
+        Platforms are auto-detected from <strong>Base_*</strong> columns (e.g., Base_FB, Base_IG, Base_YT, Base_SMM).<br/>
+        AMs per platform (optional): <strong>AM_FB, AM_IG, AM_YT, AM_SMM</strong> (comma-separated allowed).<br/>
+        CSM column (optional): <strong>CSM</strong> (comma-separated allowed).<br/>
+        Default overage weights (optional): <strong>OverageW_*</strong>.
+      </div>
       <div id="mapping-master"></div>
       <div id="mapping-stripe" style="margin-top:10px"></div>
     </section>
@@ -113,6 +121,8 @@
           <label>Export</label>
           <div class="row">
             <button id="btn-export-alloc" class="btn btn-outline" disabled>Allocations (CSV)</button>
+            <button id="btn-export-am" class="btn btn-outline" disabled>By AM (CSV)</button>
+            <button id="btn-export-csm" class="btn btn-outline" disabled>By CSM (CSV)</button>
             <button id="btn-export-unmatched" class="btn btn-outline" disabled>Unmatched (CSV)</button>
           </div>
         </div>
@@ -122,11 +132,24 @@
   </div>
 
   <section class="card" style="margin-top:12px">
+    <div class="tabbar">
+      <button class="active" data-tab="client">By Client</button>
+      <button data-tab="am">By AM</button>
+      <button data-tab="csm">By CSM</button>
+      <button data-tab="platform">By Platform</button>
+      <button data-tab="unmatched">Unmatched</button>
+    </div>
+
     <div class="sumrow">
-      <div class="hint">Below: one section per <strong>CustomerID + Period</strong>. Enter how to split the overage across platforms, then click <em>Save Overage</em>.</div>
+      <div class="hint">One section per <strong>CustomerID + Period</strong>. Enter how to split the overage across platforms, then click <em>Save Overage</em>.</div>
       <div class="badge tiny"><span id="platform-list"></span></div>
     </div>
-    <div id="results"></div>
+
+    <div id="view-client"></div>
+    <div id="view-am" style="display:none"></div>
+    <div id="view-csm" style="display:none"></div>
+    <div id="view-platform" style="display:none"></div>
+    <div id="view-unmatched" style="display:none"></div>
   </section>
 </main>
 
@@ -158,10 +181,13 @@ function getHeaders(rows){ return rows && rows.length ? rows[0].map(h=>(h||'').t
 const state={
   master:{rows:null, headers:[], map:{}},
   stripe:{rows:null, headers:[], map:{}},
-  platforms:[], // e.g., ['FB','IG','YT'] with display names from Base_* headers
-  platformLabels:{}, // key->label (from Base_* suffix)
-  results:[], // per client-period allocation objects
-  unmatched:[], // stripe groups with no master row
+  platforms:[],          // keys like 'FB','IG','YT','SMM'
+  platformLabels:{},     // key->label from Base_* suffix (display)
+  results:[],            // per client-period allocation objects
+  unmatched:[],          // stripe groups with no master row
+  amSummary:[],          // computed after allocations
+  csmSummary:[],         // computed after allocations
+  platformSummary:[],    // computed after allocations
 };
 const fileMaster=document.getElementById('file-master');
 const fileStripe=document.getElementById('file-stripe');
@@ -198,15 +224,14 @@ function detectPlatforms(headers){
   headers.forEach(h=>{
     const m = /^Base[_\s-]*(.+)$/i.exec(h.trim());
     if(m){
-      const suffix=m[1].trim();
-      const key=normalizePlatKey(suffix); // e.g., FB, IG, YT, TT, SMM
+      const suffix=m[1].trim();         // e.g., FB, IG, YT, SMM
+      const key=normalizePlatKey(suffix);
       if(!state.platforms.includes(key)){
         state.platforms.push(key);
-        state.platformLabels[key]=suffix; // keep as shown in header
+        state.platformLabels[key]=suffix; // keep visible label
       }
     }
   });
-  // stable order
   state.platforms.sort((a,b)=>a.localeCompare(b));
 }
 
@@ -218,7 +243,8 @@ function renderMappings(){
     {key:'id', label:'CustomerID'},
     {key:'clientName', label:'Client Name (optional)'},
     {key:'email', label:'Email (optional)'},
-    // Bases & weights are auto by headers; no manual mapping needed.
+    {key:'csm', label:'CSM (comma-separated)'},
+    // AM_* per platform are auto-read from columns named AM_*; no dropdowns needed.
   ], true);
 
   // Stripe
@@ -247,7 +273,7 @@ function mappingBlock(title, datasetKey, headers, fields, notePlatforms){
   }).join('');
   const extra = notePlatforms ? `<div class="hint" style="margin-top:6px">Detected platforms: ${
     state.platforms.length? state.platforms.map(k=>`<span class="platform-chip">${encodeHtml(state.platformLabels[k]||k)}</span>`).join(' ') : '—'
-  }</div>` : '';
+  }<br/>We will also read any <strong>AM_*</strong> columns (e.g., AM_FB, AM_IG, AM_YT, AM_SMM) and <strong>CSM</strong> for grouping.</div>` : '';
   return `<details open><summary><strong>${title}</strong></summary><div style="padding-top:6px">${rows}${extra}</div></details>`;
 }
 function autoMap(datasetKey){
@@ -259,6 +285,7 @@ function autoMap(datasetKey){
       id: pick(/^customer[_\s-]*id$/i,/^stripe[_\s-]*(customer|id)$/i,/^id$/i,/^customerid$/i),
       clientName: pick(/^client[_\s-]*name$/i,/^customer[_\s-]*name$/i,/^name$/i),
       email: pick(/^email$/i,/^client[_\s-]*email$/i,/^customer[_\s-]*email$/i),
+      csm: pick(/^csm$/i,/^client[\s_-]*success$/i,/^customer[\s_-]*success$/i),
     };
   } else {
     state[datasetKey].map = {
@@ -307,7 +334,11 @@ function encodeHtml(s){return (s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&
 function toNum(v){const n=Number(String(v).replace(/[^0-9.\-]/g,'')); return isNaN(n)?0:n;}
 function fmt(n,c){const sign=n<0?'-':'';const v=Math.abs(n);return `${sign}${c}${v.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}`;}
 function monthKey(dateStr){const d=new Date(dateStr); if(isNaN(d)) return 'Unknown'; return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;}
-function normalizePlatKey(s){return String(s).trim();} // keep suffix verbatim (FB, IG, YT, etc.)
+function normalizePlatKey(s){return String(s).trim();}
+function splitNames(raw){
+  if(!raw) return [];
+  return String(raw).split(/[,;\/\n]|\s+&\s+|\s+and\s+/gi).map(s=>s.trim()).filter(Boolean);
+}
 
 /*** Period UI toggle ***/
 const modeSel=document.getElementById('period-mode');
@@ -361,8 +392,8 @@ function runAll(){
     txnAll++; amtAll+=amt;
   });
 
-  const platforms = state.platforms.slice(); // keys like 'FB','IG','YT'
-  // Build results
+  const platforms = state.platforms.slice();
+
   const results=[];
   const unmatched=[];
   groups.forEach(g=>{
@@ -372,12 +403,14 @@ function runAll(){
       unmatched.push({...g});
       return;
     }
-    // If multiple master rows per id, just take first (or merge bases)
-    // Here we merge: sum bases per platform if repeated.
+
+    // Merge bases, default weights; collect AMs per platform and CSMs
     const baseMap = Object.create(null);
-    platforms.forEach(k=>baseMap[k]=0);
     const weightMap = Object.create(null);
-    platforms.forEach(k=>weightMap[k]=null);
+    const amByPlat = Object.create(null);
+    const csms = new Set();
+
+    platforms.forEach(k=>{ baseMap[k]=0; weightMap[k]=null; amByPlat[k]=new Set(); });
 
     masterRows.forEach(m=>{
       // bases
@@ -394,13 +427,26 @@ function runAll(){
             const val = m[h]; if(val!=='' && val!=null) weightMap[key]=toNum(val);
           }
         }
+        const mAM=/^AM[_\s-]*(.+)$/i.exec(h);
+        if(mAM){
+          const key=normalizePlatKey(mAM[1].trim());
+          if(platforms.includes(key)){
+            splitNames(m[h]).forEach(n=> amByPlat[key].add(n));
+          }
+        }
       });
+      // CSM
+      const csmHeader = state.master.map.csm;
+      if(csmHeader && m[csmHeader]!=null){
+        splitNames(m[csmHeader]).forEach(n=> csms.add(n));
+      } else if (m.CSM!=null){ // permissive fallback
+        splitNames(m.CSM).forEach(n=> csms.add(n));
+      }
     });
 
     const baseNeeded = platforms.reduce((s,k)=>s+ (baseMap[k]||0), 0);
     const totalPaid = g.total;
-    let allocBase = {};
-    platforms.forEach(k=>allocBase[k]=0);
+    let allocBase = {}; platforms.forEach(k=>allocBase[k]=0);
     let overage = 0;
 
     if(baseNeeded<=0){
@@ -415,8 +461,7 @@ function runAll(){
     }
 
     // default suggested overage using weights → else proportional to bases → else equal
-    let suggested = {};
-    platforms.forEach(k=>suggested[k]=0);
+    let suggested = {}; platforms.forEach(k=>suggested[k]=0);
     if(overage>0){
       const sumW = platforms.reduce((s,k)=> s + (weightMap[k]??0), 0);
       if(sumW>0.999 && sumW<1.001){
@@ -439,33 +484,134 @@ function runAll(){
       overage,
       overageAlloc: suggested, // editable by user
       saved:false,
-      clientName: masterRows[0].ClientName || masterRows[0].clientName || '',
-      email: masterRows[0].Email || masterRows[0].email || ''
+      ams: Object.fromEntries(platforms.map(k=>[k, Array.from(amByPlat[k])])),
+      csms: Array.from(csms),
+      clientName: guessName(masterRows),
+      email: guessEmail(masterRows)
     });
   });
 
   state.results=results;
   state.unmatched=unmatched;
 
-  renderResults(currency);
-  runStats.innerHTML = `Groups: <strong>${results.length}</strong> matched, <strong>${unmatched.length}</strong> unmatched. Transactions: <strong>${txnAll}</strong>. Total amount: <strong>${fmt(amtAll,currency)}</strong>.`;
+  // Build summaries from current allocations (base + overage suggestion)
+  recomputeSummaries();
+
+  renderPlatformBadge();
+  renderAllViews();
+  runStats.innerHTML = `Matched groups: <strong>${results.length}</strong> • Unmatched: <strong>${unmatched.length}</strong> • Transactions: <strong>${txnAll}</strong> • Total amount: <strong>${fmt(amtAll,currency)}</strong>.`;
   document.getElementById('btn-export-alloc').disabled = results.length===0;
   document.getElementById('btn-export-unmatched').disabled = unmatched.length===0;
+  document.getElementById('btn-export-am').disabled = state.amSummary.length===0;
+  document.getElementById('btn-export-csm').disabled = state.csmSummary.length===0;
 }
 
-/*** UI: results & editor ***/
+function guessName(rows){
+  for(const r of rows){
+    if(r.ClientName) return r.ClientName;
+    if(r.clientName) return r.clientName;
+    if(r.Name) return r.Name;
+  }
+  return '';
+}
+function guessEmail(rows){
+  for(const r of rows){
+    if(r.Email) return r.Email;
+    if(r.email) return r.email;
+  }
+  return '';
+}
+
+/*** Summaries ***/
+function recomputeSummaries(){
+  const currency=document.getElementById('currency').value || '$';
+  const plats=state.platforms;
+
+  // By Platform
+  const platMap = new Map(); // platform -> {total, details[]}
+  function ensurePlat(p){ if(!platMap.has(p)) platMap.set(p,{platform:p,total:0,details:[]}); return platMap.get(p); }
+
+  // By AM
+  const amMap = new Map(); // amName -> {am, total, rows[]}
+  function ensureAM(n){ if(!amMap.has(n)) amMap.set(n,{am:n,total:0,rows:[]}); return amMap.get(n); }
+
+  // By CSM (total revenue, not divided)
+  const csmMap = new Map(); // csmName -> {csm, total, rows[]}
+  function ensureCSM(n){ if(!csmMap.has(n)) csmMap.set(n,{csm:n,total:0,rows:[]}); return csmMap.get(n); }
+
+  state.results.forEach(r=>{
+    // compute per-platform final alloc = baseAlloc + overageAlloc
+    const finalAlloc = Object.create(null);
+    plats.forEach(p=> finalAlloc[p] = (r.allocBase[p]||0) + (r.overageAlloc[p]||0));
+
+    // Platform totals/details
+    plats.forEach(p=>{
+      const a = finalAlloc[p]||0;
+      if(a>0 || (r.bases[p]||0)>0) {
+        const pm = ensurePlat(p);
+        pm.total += a;
+        pm.details.push({
+          platform:p, customerId:r.id, period:r.period,
+          clientName:r.clientName, amount:a
+        });
+      }
+    });
+
+    // AM totals/details — each AM for that platform gets FULL credit of the platform amount
+    plats.forEach(p=>{
+      const a = finalAlloc[p]||0;
+      if(a<=0) return;
+      const ams = r.ams && r.ams[p] ? r.ams[p] : [];
+      if(ams.length===0) return;
+      ams.forEach(name=>{
+        const rec = ensureAM(name);
+        rec.total += a;
+        rec.rows.push({
+          am:name, platform:p, customerId:r.id, period:r.period,
+          clientName:r.clientName, amount:a
+        });
+      });
+    });
+
+    // CSM totals/details — every CSM gets FULL credit for TOTAL revenue
+    const totalRevenue = r.totalPaid || 0;
+    if(totalRevenue>0 && r.csms && r.csms.length){
+      r.csms.forEach(name=>{
+        const rec = ensureCSM(name);
+        rec.total += totalRevenue;
+        rec.rows.push({
+          csm:name, customerId:r.id, period:r.period,
+          clientName:r.clientName, totalRevenue
+        });
+      });
+    }
+  });
+
+  state.platformSummary = Array.from(platMap.values()).sort((a,b)=>a.platform.localeCompare(b.platform));
+  state.amSummary = Array.from(amMap.values()).sort((a,b)=> a.am.localeCompare(b.am));
+  state.csmSummary = Array.from(csmMap.values()).sort((a,b)=> a.csm.localeCompare(b.csm));
+}
+
+/*** Views ***/
 function renderPlatformBadge(){
   const span=document.getElementById('platform-list');
   if(!state.platforms.length){ span.textContent='No platforms detected'; return; }
   span.innerHTML = state.platforms.map(k=>`<span class="platform-chip">${encodeHtml(state.platformLabels[k]||k)}</span>`).join('');
 }
 
-function renderResults(currency){
-  const root=document.getElementById('results');
-  if(!state.results.length){ root.innerHTML='<div class="hint">No results yet.</div>'; return; }
+function renderAllViews(){
+  const currency=document.getElementById('currency').value || '$';
+  renderClient(currency);
+  renderAM(currency);
+  renderCSM(currency);
+  renderPlatform(currency);
+  renderUnmatched(currency);
+}
 
-  // sort for stable viewing
+function renderClient(currency){
+  const root=document.getElementById('view-client');
   const items=state.results.slice().sort((a,b)=> (a.id.localeCompare(b.id)) || (a.period.localeCompare(b.period)));
+  if(!items.length){ root.innerHTML='<div class="hint">No results yet.</div>'; return; }
 
   root.innerHTML = items.map((r,idx)=>{
     const baseNeeded = Object.values(r.bases).reduce((s,x)=>s+(x||0),0);
@@ -482,6 +628,13 @@ function renderResults(currency){
 
     const editor = r.overage>0 ? overageEditor(idx,r,currency) : `<div class="hint">No overage for this group.</div>`;
 
+    // AMs/CSMs overview
+    const amLines = state.platforms.map(p=>{
+      const ams = (r.ams && r.ams[p] && r.ams[p].length) ? r.ams[p].join(', ') : '—';
+      return `<span class="platform-chip">AM_${encodeHtml(p)}: ${encodeHtml(ams)}</span>`;
+    }).join(' ');
+    const csmLine = r.csms && r.csms.length ? r.csms.join(', ') : '—';
+
     return `<details>
       <summary>
         <div class="sumrow">
@@ -496,7 +649,12 @@ function renderResults(currency){
         </div>
       </summary>
       <div style="padding-top:8px">
-        <div class="hint">Fixed Bases:</div>
+        <div class="hint">AMs by platform:</div>
+        <div style="margin:6px 0">${amLines}</div>
+        <div class="hint">CSM(s):</div>
+        <div style="margin:6px 0"><span class="platform-chip">${encodeHtml(csmLine)}</span></div>
+
+        <div class="hint" style="margin-top:6px">Fixed Bases:</div>
         <div style="margin:6px 0">${baseCells}</div>
         <div class="hint">Base Allocated (after shortfall check):</div>
         <div style="margin:6px 0">${baseAllocCells}</div>
@@ -509,7 +667,6 @@ function renderResults(currency){
 
 function overageEditor(idx,r,currency){
   const k = `edit-${idx}`;
-  // build inputs row
   const inputs = state.platforms.map(pk=>{
     const label = encodeHtml(state.platformLabels[pk]||pk);
     const val = +(r.overageAlloc[pk]||0);
@@ -523,7 +680,6 @@ function overageEditor(idx,r,currency){
   const remaining = r.overage - totalNow;
   const remStr = (Math.abs(remaining) < 0.005) ? `<span class="badge tiny" style="border-color:#14532d">OK</span>` :
                   `<span class="badge tiny" style="border-color:#7f1d1d">Need ${fmt(remaining,currency)}</span>`;
-
   const disabled = Math.abs(remaining) >= 0.005;
 
   return `
@@ -545,7 +701,6 @@ function overageEditor(idx,r,currency){
     </div>
   </div>`;
 }
-
 function sumOverage(map){ return Object.values(map||{}).reduce((s,x)=>s+(+x||0),0); }
 
 document.addEventListener('input',e=>{
@@ -556,8 +711,8 @@ document.addEventListener('input',e=>{
   const r=state.results[idx];
   const v=toNum(e.target.value);
   r.overageAlloc[plat]=v;
-  // re-render that section
-  renderResults(document.getElementById('currency').value||'$');
+  recomputeSummaries();
+  renderAllViews();
 });
 document.addEventListener('click',e=>{
   // quick fills
@@ -577,17 +732,14 @@ document.addEventListener('click',e=>{
       if(baseSum>0) plats.forEach(p=>r.overageAlloc[p]= over * (Math.max(0,r.bases[p]||0)/baseSum));
       else { const eq=over/(plats.length||1); plats.forEach(p=>r.overageAlloc[p]=eq); }
     } else if(mode==='weights'){
-      // try to read weights from original master rows? We merged into "suggested" already.
-      // Here we recompute based on closest-to-weights:
-      // If current suggestion already used weights initially, do nothing; otherwise equal
+      // keep current suggestion; if sums off, fall back to equal
       const sum= sumOverage(r.overageAlloc);
-      if(Math.abs(sum - over) < 0.005){
-        // keep as is
-      } else {
+      if(Math.abs(sum - over) >= 0.005){
         const eq=over/(plats.length||1); plats.forEach(p=>r.overageAlloc[p]=eq);
       }
     }
-    renderResults(document.getElementById('currency').value||'$');
+    recomputeSummaries();
+    renderAllViews();
   }
 
   // save
@@ -600,19 +752,146 @@ document.addEventListener('click',e=>{
       return;
     }
     r.saved=true;
-    // soft confirm
     e.target.textContent='Saved ✓';
-    setTimeout(()=>{ renderResults(document.getElementById('currency').value||'$'); }, 600);
+    setTimeout(()=>{ renderAllViews(); }, 600);
   }
 });
 
-/*** Export ***/
+/*** By AM view ***/
+function renderAM(currency){
+  const root=document.getElementById('view-am');
+  const items = state.amSummary;
+  if(!items.length){ root.innerHTML='<div class="hint">No AM data yet.</div>'; return; }
+
+  let html='';
+  items.forEach(am=>{
+    const total = am.total || 0;
+    const rows = am.rows.slice().sort((a,b)=> (a.customerId.localeCompare(b.customerId)) || (a.period.localeCompare(b.period)) || (a.platform.localeCompare(b.platform)));
+    const tbody = rows.map(r=>`<tr>
+      <td>${encodeHtml(r.customerId)}</td>
+      <td>${encodeHtml(r.clientName||'')}</td>
+      <td>${encodeHtml(r.period)}</td>
+      <td>${encodeHtml(state.platformLabels[r.platform]||r.platform)}</td>
+      <td class="right">${fmt(r.amount,currency)}</td>
+    </tr>`).join('');
+    html += `<details>
+      <summary class="sumrow">
+        <div><strong>${encodeHtml(am.am)}</strong> <span class="hint">(${rows.length} allocations)</span></div>
+        <div class="badge tiny">Total: ${fmt(total,currency)}</div>
+      </summary>
+      <div style="overflow:auto">
+        <table>
+          <thead><tr><th>CustomerID</th><th>Client</th><th>Period</th><th>Platform</th><th class="right">Amount</th></tr></thead>
+          <tbody>${tbody}</tbody>
+        </table>
+      </div>
+    </details>`;
+  });
+  root.innerHTML = html;
+}
+
+/*** By CSM view ***/
+function renderCSM(currency){
+  const root=document.getElementById('view-csm');
+  const items = state.csmSummary;
+  if(!items.length){ root.innerHTML='<div class="hint">No CSM data yet.</div>'; return; }
+
+  let html='';
+  items.forEach(cs=>{
+    const total = cs.total || 0;
+    const rows = cs.rows.slice().sort((a,b)=> (a.customerId.localeCompare(b.customerId)) || (a.period.localeCompare(b.period)));
+    const tbody = rows.map(r=>`<tr>
+      <td>${encodeHtml(r.customerId)}</td>
+      <td>${encodeHtml(r.clientName||'')}</td>
+      <td>${encodeHtml(r.period)}</td>
+      <td class="right">${fmt(r.totalRevenue||0,currency)}</td>
+    </tr>`).join('');
+    html += `<details>
+      <summary class="sumrow">
+        <div><strong>${encodeHtml(cs.csm)}</strong> <span class="hint">(${rows.length} client-periods)</span></div>
+        <div class="badge tiny">Total Revenue: ${fmt(total,currency)}</div>
+      </summary>
+      <div style="overflow:auto">
+        <table>
+          <thead><tr><th>CustomerID</th><th>Client</th><th>Period</th><th class="right">Total Revenue</th></tr></thead>
+          <tbody>${tbody}</tbody>
+        </table>
+      </div>
+    </details>`;
+  });
+  root.innerHTML = html;
+}
+
+/*** By Platform view ***/
+function renderPlatform(currency){
+  const root=document.getElementById('view-platform');
+  const items = state.platformSummary;
+  if(!items.length){ root.innerHTML='<div class="hint">No platform data yet.</div>'; return; }
+
+  let html='';
+  items.forEach(p=>{
+    const total = p.total || 0;
+    const rows = p.details.slice().sort((a,b)=> (a.customerId.localeCompare(b.customerId)) || (a.period.localeCompare(b.period)));
+    const tbody = rows.map(r=>`<tr>
+      <td>${encodeHtml(r.customerId)}</td>
+      <td>${encodeHtml(r.clientName||'')}</td>
+      <td>${encodeHtml(r.period)}</td>
+      <td class="right">${fmt(r.amount,currency)}</td>
+    </tr>`).join('');
+    html += `<details>
+      <summary class="sumrow">
+        <div><strong>${encodeHtml(state.platformLabels[p.platform]||p.platform)}</strong> <span class="hint">(${rows.length} allocations)</span></div>
+        <div class="badge tiny">Total: ${fmt(total,currency)}</div>
+      </summary>
+      <div style="overflow:auto">
+        <table>
+          <thead><tr><th>CustomerID</th><th>Client</th><th>Period</th><th class="right">Amount</th></tr></thead>
+          <tbody>${tbody}</tbody>
+        </table>
+      </div>
+    </details>`;
+  });
+  root.innerHTML = html;
+}
+
+/*** Unmatched view ***/
+function renderUnmatched(currency){
+  const root=document.getElementById('view-unmatched');
+  const items = state.unmatched;
+  if(!items.length){ root.innerHTML='<div class="hint">No unmatched groups. 🎉</div>'; return; }
+  const tbody = items.slice().sort((a,b)=> (a.id.localeCompare(b.id)) || (a.period.localeCompare(b.period))).map(u=>`<tr>
+    <td>${encodeHtml(u.id)}</td>
+    <td>${encodeHtml(u.period)}</td>
+    <td class="right">${u.txns}</td>
+    <td class="right">${fmt(u.total, currency)}</td>
+  </tr>`).join('');
+  root.innerHTML = `
+    <table>
+      <thead><tr><th>CustomerID</th><th>Period</th><th class="right">Transactions</th><th class="right">Total Paid</th></tr></thead>
+      <tbody>${tbody}</tbody>
+    </table>
+  `;
+}
+
+/*** Tabs ***/
+document.querySelectorAll('.tabbar button').forEach(btn=>{
+  btn.addEventListener('click',()=>{
+    document.querySelectorAll('.tabbar button').forEach(b=>b.classList.remove('active'));
+    btn.classList.add('active');
+    const tab=btn.getAttribute('data-tab');
+    document.getElementById('view-client').style.display = (tab==='client') ? '' : 'none';
+    document.getElementById('view-am').style.display = (tab==='am') ? '' : 'none';
+    document.getElementById('view-csm').style.display = (tab==='csm') ? '' : 'none';
+    document.getElementById('view-platform').style.display = (tab==='platform') ? '' : 'none';
+    document.getElementById('view-unmatched').style.display = (tab==='unmatched') ? '' : 'none';
+  });
+});
+
+/*** Export buttons ***/
 document.getElementById('btn-export-alloc').addEventListener('click',()=>{
-  const c=document.getElementById('currency').value||'$';
   const rows=[];
   state.results.forEach(r=>{
-    const baseNeeded = Object.values(r.bases).reduce((s,x)=>s+(x||0),0);
-    const objBase={}; const objOver={}; const objTotal={};
+    const objBase={}, objOver={}, objTotal={};
     state.platforms.forEach(p=>{
       objBase['Base_'+p]=(r.allocBase[p]||0);
       objOver['Overage_'+p]=(r.overageAlloc[p]||0);
@@ -620,10 +899,10 @@ document.getElementById('btn-export-alloc').addEventListener('click',()=>{
     });
     rows.push({
       CustomerID:r.id,
+      Client:r.clientName||'',
       Period:r.period,
       Transactions:r.txns,
       TotalPaid:r.totalPaid,
-      BaseNeeded: baseNeeded,
       Overage:r.overage,
       ...objBase,
       ...objOver,
@@ -632,12 +911,51 @@ document.getElementById('btn-export-alloc').addEventListener('click',()=>{
   });
   download('allocations.csv', toCSV(rows));
 });
+
+document.getElementById('btn-export-am').addEventListener('click',()=>{
+  const rows=[];
+  state.amSummary.forEach(am=>{
+    am.rows.forEach(r=>{
+      rows.push({
+        AM: r.am,
+        Platform: state.platformLabels[r.platform]||r.platform,
+        CustomerID: r.customerId,
+        Client: r.clientName||'',
+        Period: r.period,
+        Amount: r.amount
+      });
+    });
+    // Add a total line (optional)
+    rows.push({ AM: am.am, Platform:'(TOTAL)', CustomerID:'', Client:'', Period:'', Amount: am.total });
+  });
+  download('by_am.csv', toCSV(rows));
+});
+
+document.getElementById('btn-export-csm').addEventListener('click',()=>{
+  const rows=[];
+  state.csmSummary.forEach(cs=>{
+    cs.rows.forEach(r=>{
+      rows.push({
+        CSM: r.csm,
+        CustomerID: r.customerId,
+        Client: r.clientName||'',
+        Period: r.period,
+        TotalRevenue: r.totalRevenue||0
+      });
+    });
+    rows.push({ CSM: cs.csm, CustomerID:'', Client:'', Period:'', TotalRevenue: cs.total });
+  });
+  download('by_csm.csv', toCSV(rows));
+});
+
 document.getElementById('btn-export-unmatched').addEventListener('click',()=>{
   const rows=state.unmatched.map(u=>({
     CustomerID:u.id, Period:u.period, Transactions:u.txns, TotalPaid:u.total
   }));
   download('unmatched.csv', toCSV(rows));
 });
+
+/*** CSV utils ***/
 function toCSV(list){
   if(!list.length) return '';
   const headers=Object.keys(list[0]);
