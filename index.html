@@ -1,0 +1,658 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Overage Allocator (CustomerID → Platforms)</title>
+<style>
+  :root{
+    --bg:#0b1220;--card:#0f172a;--text:#e5e7eb;--sub:#94a3b8;
+    --accent:#4f46e5;--ok:#22c55e;--warn:#f59e0b;--border:#1f2937;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,Noto Sans,Helvetica Neue,Arial;background:linear-gradient(180deg,var(--bg),#0a0f1a 65%);color:var(--text)}
+  header{position:sticky;top:0;z-index:20;padding:22px 16px 10px;text-align:center;background:linear-gradient(180deg,rgba(11,18,32,.9),rgba(11,18,32,.4));backdrop-filter:blur(8px);border-bottom:1px solid var(--border)}
+  h1{margin:0 0 4px;font-size:20px}
+  .sub{color:var(--sub);font-size:13px}
+  main{max-width:1200px;margin:18px auto 60px;padding:0 14px}
+  .grid{display:grid;gap:12px}
+  @media(min-width:980px){.grid-3{grid-template-columns:1fr 1fr 1fr}}
+  @media(max-width:979px){.grid-3{grid-template-columns:1fr}}
+
+  .card{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:14px;box-shadow:0 8px 30px rgba(0,0,0,.25)}
+  .card h2{margin:0 0 8px;font-size:16px}
+  .hint{color:var(--sub);font-size:12px}
+  .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  .row>*{flex:1}
+  .filebox{border:1px dashed #334155;padding:10px;border-radius:10px;background:#0b1220}
+  input[type="file"]{width:100%;padding:8px;color:var(--sub)}
+  select,input[type="text"],input[type="number"],input[type="date"]{
+    background:#0b1220;border:1px solid #334155;color:var(--text);padding:8px 10px;border-radius:10px;width:100%;outline:none
+  }
+  label{display:block;color:var(--sub);font-size:12px;margin:6px 0 4px}
+  .btn{background:var(--accent);color:#fff;border:none;padding:9px 12px;border-radius:12px;font-weight:700;cursor:pointer}
+  .btn:disabled{opacity:.6;cursor:not-allowed}
+  .btn-outline{background:transparent;border:1px solid #334155}
+  .btn-ok{background:var(--ok)}
+  .btn-warn{background:var(--warn);color:#111827}
+  table{width:100%;border-collapse:collapse;margin-top:8px}
+  th,td{padding:8px 10px;border-bottom:1px solid var(--border);text-align:left;font-size:13px}
+  th{color:var(--sub)}
+  .right{text-align:right}
+  .pill{display:inline-flex;gap:6px;align-items:center;padding:2px 8px;border-radius:999px;border:1px solid #334155;background:#0b1220;color:var(--sub);font-size:11px}
+  details{border:1px solid var(--border);border-radius:10px;padding:8px;background:#0b1220}
+  details+details{margin-top:8px}
+  details summary{cursor:pointer}
+  .kbd{font-family:ui-monospace,Menlo,Consolas,monospace;background:#0a0f1a;border:1px solid #334155;border-bottom-width:2px;padding:2px 6px;border-radius:6px;font-size:12px}
+  .badge{display:inline-flex;gap:6px;align-items:center;padding:2px 8px;border-radius:999px;border:1px solid #334155}
+  .tiny{font-size:12px}
+  .platform-chip{display:inline-block;font-size:11px;padding:2px 6px;border-radius:6px;background:#111827;border:1px solid #334155;margin-right:6px}
+  .sumrow{display:flex;justify-content:space-between;align-items:center;gap:8px}
+  .sticky-actions{position:sticky;bottom:0;background:linear-gradient(180deg,rgba(15,23,42,.5),rgba(15,23,42,.95));backdrop-filter:blur(6px);padding:8px;border:1px solid var(--border);border-radius:10px;margin-top:10px}
+</style>
+</head>
+<body>
+<header>
+  <h1>Overage Allocator</h1>
+  <div class="sub">Upload Masterlist (with <span class="kbd">Base_*</span> columns) + Stripe. Match by <span class="kbd">CustomerID</span>. Allocate <em>overage</em> per client & period with custom inputs.</div>
+</header>
+
+<main>
+  <div class="grid grid-3">
+    <section class="card">
+      <h2>1) Upload CSVs</h2>
+      <div class="grid">
+        <div class="filebox">
+          <label>Masterlist CSV</label>
+          <input type="file" id="file-master" accept=".csv"/>
+          <div class="hint" id="hint-master">No file chosen.</div>
+        </div>
+        <div class="filebox">
+          <label>Stripe CSV</label>
+          <input type="file" id="file-stripe" accept=".csv"/>
+          <div class="hint" id="hint-stripe">No file chosen.</div>
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <label>Currency</label>
+          <input type="text" id="currency" value="$"/>
+        </div>
+        <div>
+          <label>Period Mode</label>
+          <select id="period-mode">
+            <option value="monthly">Monthly (by Created date)</option>
+            <option value="range">Date Range (custom)</option>
+          </select>
+        </div>
+        <div id="range-wrap" style="display:none">
+          <label>Date Range</label>
+          <div class="row">
+            <input type="date" id="date-from"/>
+            <input type="date" id="date-to"/>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>2) Map Columns</h2>
+      <div class="hint">We auto-detect platforms from any columns named <strong>Base_*</strong> (e.g., Base_FB, Base_IG, Base_YT). Optional default weights: <strong>OverageW_*</strong>.</div>
+      <div id="mapping-master"></div>
+      <div id="mapping-stripe" style="margin-top:10px"></div>
+    </section>
+
+    <section class="card">
+      <h2>3) Run</h2>
+      <div class="row" style="align-items:flex-end">
+        <div>
+          <label>Ready?</label>
+          <button id="btn-run" class="btn" disabled>Aggregate & Prepare Overage</button>
+        </div>
+        <div>
+          <label>Export</label>
+          <div class="row">
+            <button id="btn-export-alloc" class="btn btn-outline" disabled>Allocations (CSV)</button>
+            <button id="btn-export-unmatched" class="btn btn-outline" disabled>Unmatched (CSV)</button>
+          </div>
+        </div>
+      </div>
+      <div id="run-stats" class="hint" style="margin-top:8px"></div>
+    </section>
+  </div>
+
+  <section class="card" style="margin-top:12px">
+    <div class="sumrow">
+      <div class="hint">Below: one section per <strong>CustomerID + Period</strong>. Enter how to split the overage across platforms, then click <em>Save Overage</em>.</div>
+      <div class="badge tiny"><span id="platform-list"></span></div>
+    </div>
+    <div id="results"></div>
+  </section>
+</main>
+
+<script>
+/*** CSV parsing ***/
+function parseCSV(text){
+  const rows=[];let i=0,field='',row=[],inQ=false;
+  while(i<text.length){const c=text[i];
+    if(inQ){ if(c==='"'){ if(text[i+1]==='"'){field+='"';i++;} else inQ=false; } else field+=c; }
+    else { if(c==='"') inQ=true; else if(c===','){row.push(field);field='';}
+      else if(c==='\n'){row.push(field);rows.push(row);field='';row=[];}
+      else if(c!=='\r'){field+=c;}
+    } i++;
+  }
+  if(field.length||row.length){row.push(field);rows.push(row);}
+  if(rows.length && rows[rows.length-1].length===1 && rows[rows.length-1][0]==='') rows.pop();
+  return rows;
+}
+function rowsToObjects(rows){
+  if(!rows||!rows.length) return [];
+  const headers=rows[0].map(h=>(h||'').trim());
+  return rows.slice(1).map(r=>{
+    const o={}; r.forEach((v,idx)=>o[headers[idx]||`col_${idx}`]=v); return o;
+  });
+}
+function getHeaders(rows){ return rows && rows.length ? rows[0].map(h=>(h||'').trim()) : []; }
+
+/*** State ***/
+const state={
+  master:{rows:null, headers:[], map:{}},
+  stripe:{rows:null, headers:[], map:{}},
+  platforms:[], // e.g., ['FB','IG','YT'] with display names from Base_* headers
+  platformLabels:{}, // key->label (from Base_* suffix)
+  results:[], // per client-period allocation objects
+  unmatched:[], // stripe groups with no master row
+};
+const fileMaster=document.getElementById('file-master');
+const fileStripe=document.getElementById('file-stripe');
+fileMaster.addEventListener('change',()=>handleFile(fileMaster.files[0],'master','hint-master'));
+fileStripe.addEventListener('change',()=>handleFile(fileStripe.files[0],'stripe','hint-stripe'));
+
+/*** File handling ***/
+function handleFile(file,key,hintId){
+  if(!file) return;
+  const reader=new FileReader();
+  reader.onload=e=>{
+    const text=e.target.result;
+    const rows=parseCSV(text);
+    const headers=getHeaders(rows);
+    state[key].rows=rows;
+    state[key].headers=headers;
+
+    if(key==='master'){
+      detectPlatforms(headers);
+      renderPlatformBadge();
+    }
+
+    autoMap(key);
+    document.getElementById(hintId).textContent=`${file.name} • ${rows.length-1} data rows • ${headers.length} columns`;
+    renderMappings();
+    maybeEnableRun();
+  };
+  reader.readAsText(file);
+}
+
+/*** Platform detection from Base_* columns ***/
+function detectPlatforms(headers){
+  state.platforms=[]; state.platformLabels={};
+  headers.forEach(h=>{
+    const m = /^Base[_\s-]*(.+)$/i.exec(h.trim());
+    if(m){
+      const suffix=m[1].trim();
+      const key=normalizePlatKey(suffix); // e.g., FB, IG, YT, TT, SMM
+      if(!state.platforms.includes(key)){
+        state.platforms.push(key);
+        state.platformLabels[key]=suffix; // keep as shown in header
+      }
+    }
+  });
+  // stable order
+  state.platforms.sort((a,b)=>a.localeCompare(b));
+}
+
+/*** Mapping ***/
+function renderMappings(){
+  // Master
+  const wrapM=document.getElementById('mapping-master');
+  wrapM.innerHTML = mappingBlock('Masterlist Mapping','master', state.master.headers, [
+    {key:'id', label:'CustomerID'},
+    {key:'clientName', label:'Client Name (optional)'},
+    {key:'email', label:'Email (optional)'},
+    // Bases & weights are auto by headers; no manual mapping needed.
+  ], true);
+
+  // Stripe
+  const wrapS=document.getElementById('mapping-stripe');
+  wrapS.innerHTML = mappingBlock('Stripe Mapping','stripe', state.stripe.headers, [
+    {key:'id', label:'CustomerID'},
+    {key:'amount', label:'Amount'},
+    {key:'created', label:'Created (date/timestamp)'},
+  ], false);
+
+  // listeners
+  document.querySelectorAll('[data-map-select]').forEach(sel=>{
+    sel.addEventListener('change',e=>{
+      const [dataset,field]=e.target.getAttribute('data-map-select').split(':');
+      state[dataset].map[field]=e.target.value||null;
+      maybeEnableRun();
+    });
+  });
+}
+function mappingBlock(title, datasetKey, headers, fields, notePlatforms){
+  const opts = (current)=> ['<option value="">— select —</option>'].concat(
+    headers.map(h=>`<option value="${encodeHtml(h)}"${h===current?' selected':''}>${encodeHtml(h)}</option>`)).join('');
+  const rows = fields.map(f=>{
+    const cur=state[datasetKey].map[f.key]||'';
+    return `<div class="row"><div><label>${f.label}</label><select data-map-select="${datasetKey}:${f.key}">${opts(cur)}</select></div></div>`;
+  }).join('');
+  const extra = notePlatforms ? `<div class="hint" style="margin-top:6px">Detected platforms: ${
+    state.platforms.length? state.platforms.map(k=>`<span class="platform-chip">${encodeHtml(state.platformLabels[k]||k)}</span>`).join(' ') : '—'
+  }</div>` : '';
+  return `<details open><summary><strong>${title}</strong></summary><div style="padding-top:6px">${rows}${extra}</div></details>`;
+}
+function autoMap(datasetKey){
+  const H=(state[datasetKey].headers||[]).map(h=>h.trim());
+  const pick=(...pats)=>bestHeader(H,pats);
+
+  if(datasetKey==='master'){
+    state[datasetKey].map = {
+      id: pick(/^customer[_\s-]*id$/i,/^stripe[_\s-]*(customer|id)$/i,/^id$/i,/^customerid$/i),
+      clientName: pick(/^client[_\s-]*name$/i,/^customer[_\s-]*name$/i,/^name$/i),
+      email: pick(/^email$/i,/^client[_\s-]*email$/i,/^customer[_\s-]*email$/i),
+    };
+  } else {
+    state[datasetKey].map = {
+      id: pick(/^customer[_\s-]*id$/i,/^stripe[_\s-]*(customer|id)$/i,/^id$/i),
+      amount: pick(/^amount$/i,/^amount[_\s-]*(paid|total)$/i,/^(total|gross|net)[_\s-]*amount$/i),
+      created: pick(/^created$/i,/^created[_\s-]*at$/i,/^date$/i,/^timestamp$/i),
+    };
+  }
+}
+function bestHeader(headers,patterns){
+  const norm=s=>(s||'').toLowerCase().replace(/[_-]/g,' ').trim();
+  // exact then regex then contains
+  for(let i=0;i<patterns.length;i++){
+    const p=patterns[i];
+    if(!(p instanceof RegExp)){
+      const t=norm(String(p));
+      const idx=headers.findIndex(h=>norm(h)===t);
+      if(idx!==-1) return headers[idx];
+    }
+  }
+  for(let i=0;i<patterns.length;i++){
+    const p=patterns[i];
+    if(p instanceof RegExp){
+      const idx=headers.findIndex(h=>p.test(h));
+      if(idx!==-1) return headers[idx];
+    }
+  }
+  for(let i=0;i<patterns.length;i++){
+    const p=patterns[i]; if(p instanceof RegExp) continue;
+    const t=norm(String(p));
+    const idx=headers.findIndex(h=>norm(h).includes(t));
+    if(idx!==-1) return headers[idx];
+  }
+  return null;
+}
+function maybeEnableRun(){
+  const needM = !!state.master.rows && !!state.master.headers.length;
+  const needS = !!state.stripe.rows && !!state.stripe.headers.length;
+  const mappedM = !!(state.master.map.id);
+  const mappedS = !!(state.stripe.map.id && state.stripe.map.amount && state.stripe.map.created);
+  document.getElementById('btn-run').disabled = !(needM && needS && mappedM && mappedS && state.platforms.length);
+}
+
+/*** Helpers ***/
+function encodeHtml(s){return (s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[c]));}
+function toNum(v){const n=Number(String(v).replace(/[^0-9.\-]/g,'')); return isNaN(n)?0:n;}
+function fmt(n,c){const sign=n<0?'-':'';const v=Math.abs(n);return `${sign}${c}${v.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}`;}
+function monthKey(dateStr){const d=new Date(dateStr); if(isNaN(d)) return 'Unknown'; return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;}
+function normalizePlatKey(s){return String(s).trim();} // keep suffix verbatim (FB, IG, YT, etc.)
+
+/*** Period UI toggle ***/
+const modeSel=document.getElementById('period-mode');
+const rangeWrap=document.getElementById('range-wrap');
+modeSel.addEventListener('change',()=>{
+  rangeWrap.style.display = modeSel.value==='range' ? '' : 'none';
+});
+
+/*** Run ***/
+const btnRun=document.getElementById('btn-run');
+const runStats=document.getElementById('run-stats');
+btnRun.addEventListener('click',runAll);
+
+function runAll(){
+  const currency=document.getElementById('currency').value || '$';
+  const periodMode=modeSel.value;
+  const dateFrom = document.getElementById('date-from').value;
+  const dateTo = document.getElementById('date-to').value;
+
+  const masterObjs = rowsToObjects(state.master.rows||[]);
+  const stripeObjs = rowsToObjects(state.stripe.rows||[]);
+
+  // index master by CustomerID
+  const mid = state.master.map.id;
+  const masterById = new Map();
+  masterObjs.forEach(m=>{
+    const id=(m[mid]||'').trim();
+    if(!id) return;
+    if(!masterById.has(id)) masterById.set(id, []);
+    masterById.get(id).push(m);
+  });
+
+  // group stripe by id + period
+  const sid=state.stripe.map.id, samt=state.stripe.map.amount, sdt=state.stripe.map.created;
+  const groups = new Map(); // key: id|period
+  let txnAll=0, amtAll=0;
+
+  stripeObjs.forEach(r=>{
+    const id=(r[sid]||'').trim(); if(!id) return;
+    const amt=toNum(r[samt]);
+    const when=r[sdt];
+    if(periodMode==='range'){
+      if(dateFrom && new Date(when)<new Date(dateFrom)) return;
+      if(dateTo && new Date(when)>new Date(dateTo+'T23:59:59')) return;
+    }
+    const period = (periodMode==='monthly') ? monthKey(when) : `${dateFrom||'ALL'}→${dateTo||'ALL'}`;
+    const key=id+'|'+period;
+    if(!groups.has(key)) groups.set(key, {id,period,txns:0,total:0,rows:[]});
+    const g=groups.get(key);
+    g.txns++; g.total+=amt; g.rows.push(r);
+    txnAll++; amtAll+=amt;
+  });
+
+  const platforms = state.platforms.slice(); // keys like 'FB','IG','YT'
+  // Build results
+  const results=[];
+  const unmatched=[];
+  groups.forEach(g=>{
+    const id=g.id;
+    const masterRows = masterById.get(id);
+    if(!masterRows || !masterRows.length){
+      unmatched.push({...g});
+      return;
+    }
+    // If multiple master rows per id, just take first (or merge bases)
+    // Here we merge: sum bases per platform if repeated.
+    const baseMap = Object.create(null);
+    platforms.forEach(k=>baseMap[k]=0);
+    const weightMap = Object.create(null);
+    platforms.forEach(k=>weightMap[k]=null);
+
+    masterRows.forEach(m=>{
+      // bases
+      Object.keys(m).forEach(h=>{
+        const mBase=/^Base[_\s-]*(.+)$/i.exec(h);
+        if(mBase){
+          const key=normalizePlatKey(mBase[1].trim());
+          if(platforms.includes(key)) baseMap[key] += toNum(m[h]);
+        }
+        const mW=/^OverageW[_\s-]*(.+)$/i.exec(h);
+        if(mW){
+          const key=normalizePlatKey(mW[1].trim());
+          if(platforms.includes(key)){
+            const val = m[h]; if(val!=='' && val!=null) weightMap[key]=toNum(val);
+          }
+        }
+      });
+    });
+
+    const baseNeeded = platforms.reduce((s,k)=>s+ (baseMap[k]||0), 0);
+    const totalPaid = g.total;
+    let allocBase = {};
+    platforms.forEach(k=>allocBase[k]=0);
+    let overage = 0;
+
+    if(baseNeeded<=0){
+      overage = totalPaid;
+    } else if(totalPaid >= baseNeeded){
+      platforms.forEach(k=>allocBase[k]=baseMap[k]||0);
+      overage = totalPaid - baseNeeded;
+    } else {
+      const ratio = totalPaid / baseNeeded;
+      platforms.forEach(k=>allocBase[k]=(baseMap[k]||0)*ratio);
+      overage = 0;
+    }
+
+    // default suggested overage using weights → else proportional to bases → else equal
+    let suggested = {};
+    platforms.forEach(k=>suggested[k]=0);
+    if(overage>0){
+      const sumW = platforms.reduce((s,k)=> s + (weightMap[k]??0), 0);
+      if(sumW>0.999 && sumW<1.001){
+        platforms.forEach(k=> suggested[k] = overage * (weightMap[k]??0));
+      } else {
+        const basePos = platforms.reduce((s,k)=> s + Math.max(0, baseMap[k]||0), 0);
+        if(basePos>0){
+          platforms.forEach(k=> suggested[k] = overage * (Math.max(0, baseMap[k]||0) / basePos));
+        } else {
+          const eq = overage / platforms.length;
+          platforms.forEach(k=> suggested[k] = eq);
+        }
+      }
+    }
+
+    results.push({
+      id, period:g.period, txns:g.txns, totalPaid,
+      bases: baseMap,
+      allocBase,
+      overage,
+      overageAlloc: suggested, // editable by user
+      saved:false,
+      clientName: masterRows[0].ClientName || masterRows[0].clientName || '',
+      email: masterRows[0].Email || masterRows[0].email || ''
+    });
+  });
+
+  state.results=results;
+  state.unmatched=unmatched;
+
+  renderResults(currency);
+  runStats.innerHTML = `Groups: <strong>${results.length}</strong> matched, <strong>${unmatched.length}</strong> unmatched. Transactions: <strong>${txnAll}</strong>. Total amount: <strong>${fmt(amtAll,currency)}</strong>.`;
+  document.getElementById('btn-export-alloc').disabled = results.length===0;
+  document.getElementById('btn-export-unmatched').disabled = unmatched.length===0;
+}
+
+/*** UI: results & editor ***/
+function renderPlatformBadge(){
+  const span=document.getElementById('platform-list');
+  if(!state.platforms.length){ span.textContent='No platforms detected'; return; }
+  span.innerHTML = state.platforms.map(k=>`<span class="platform-chip">${encodeHtml(state.platformLabels[k]||k)}</span>`).join('');
+}
+
+function renderResults(currency){
+  const root=document.getElementById('results');
+  if(!state.results.length){ root.innerHTML='<div class="hint">No results yet.</div>'; return; }
+
+  // sort for stable viewing
+  const items=state.results.slice().sort((a,b)=> (a.id.localeCompare(b.id)) || (a.period.localeCompare(b.period)));
+
+  root.innerHTML = items.map((r,idx)=>{
+    const baseNeeded = Object.values(r.bases).reduce((s,x)=>s+(x||0),0);
+    const baseCells = state.platforms.map(k=>{
+      const lab = encodeHtml(state.platformLabels[k]||k);
+      const v = r.bases[k]||0;
+      return `<span class="platform-chip">${lab}: ${fmt(v,currency)}</span>`;
+    }).join(' ');
+    const baseAllocCells = state.platforms.map(k=>{
+      const lab=encodeHtml(state.platformLabels[k]||k);
+      const v=r.allocBase[k]||0;
+      return `<span class="platform-chip">${lab}: ${fmt(v,currency)}</span>`;
+    }).join(' ');
+
+    const editor = r.overage>0 ? overageEditor(idx,r,currency) : `<div class="hint">No overage for this group.</div>`;
+
+    return `<details>
+      <summary>
+        <div class="sumrow">
+          <div>
+            <strong>${encodeHtml(r.id)}</strong> • <span class="pill">${encodeHtml(r.period)}</span>
+            <span class="hint">(${r.txns} txn)</span><br/>
+            <span class="hint">Client:</span> ${encodeHtml(r.clientName||'')} <span class="hint">Email:</span> ${encodeHtml(r.email||'')}
+          </div>
+          <div class="badge tiny">
+            Paid: ${fmt(r.totalPaid,currency)} • Base Needed: ${fmt(baseNeeded,currency)} • Overage: ${fmt(r.overage,currency)}
+          </div>
+        </div>
+      </summary>
+      <div style="padding-top:8px">
+        <div class="hint">Fixed Bases:</div>
+        <div style="margin:6px 0">${baseCells}</div>
+        <div class="hint">Base Allocated (after shortfall check):</div>
+        <div style="margin:6px 0">${baseAllocCells}</div>
+
+        <div style="margin-top:8px">${editor}</div>
+      </div>
+    </details>`;
+  }).join('');
+}
+
+function overageEditor(idx,r,currency){
+  const k = `edit-${idx}`;
+  // build inputs row
+  const inputs = state.platforms.map(pk=>{
+    const label = encodeHtml(state.platformLabels[pk]||pk);
+    const val = +(r.overageAlloc[pk]||0);
+    return `<div>
+      <label>${label}</label>
+      <input type="number" inputmode="decimal" step="0.01" min="0" data-ovr="${k}:${pk}" value="${val.toFixed(2)}"/>
+    </div>`;
+  }).join('');
+
+  const totalNow = sumOverage(r.overageAlloc);
+  const remaining = r.overage - totalNow;
+  const remStr = (Math.abs(remaining) < 0.005) ? `<span class="badge tiny" style="border-color:#14532d">OK</span>` :
+                  `<span class="badge tiny" style="border-color:#7f1d1d">Need ${fmt(remaining,currency)}</span>`;
+
+  const disabled = Math.abs(remaining) >= 0.005;
+
+  return `
+  <div class="card" style="padding:10px">
+    <div class="row">${inputs}</div>
+    <div class="row" style="margin-top:8px">
+      <button class="btn btn-outline" data-ovr-fill="${k}:equal">Equal</button>
+      <button class="btn btn-outline" data-ovr-fill="${k}:prop">Proportional to Base</button>
+      <button class="btn btn-outline" data-ovr-fill="${k}:weights">From OverageW_* (if any)</button>
+      <div class="hint" style="text-align:right">${remStr}</div>
+    </div>
+    <div class="sticky-actions">
+      <div class="row">
+        <div class="hint">Overage: <strong>${fmt(r.overage,currency)}</strong> • Enter amounts that sum to the overage.</div>
+        <div style="text-align:right">
+          <button class="btn btn-ok" data-ovr-save="${k}" ${disabled?'disabled':''}>Save Overage</button>
+        </div>
+      </div>
+    </div>
+  </div>`;
+}
+
+function sumOverage(map){ return Object.values(map||{}).reduce((s,x)=>s+(+x||0),0); }
+
+document.addEventListener('input',e=>{
+  const attr=e.target.getAttribute('data-ovr');
+  if(!attr) return;
+  const [k,plat]=attr.split(':'); // k = edit-idx
+  const idx=Number(k.split('-')[1]);
+  const r=state.results[idx];
+  const v=toNum(e.target.value);
+  r.overageAlloc[plat]=v;
+  // re-render that section
+  renderResults(document.getElementById('currency').value||'$');
+});
+document.addEventListener('click',e=>{
+  // quick fills
+  const fill=e.target.getAttribute('data-ovr-fill');
+  if(fill){
+    const [k,mode]=fill.split(':');
+    const idx=Number(k.split('-')[1]);
+    const r=state.results[idx];
+    const over=r.overage;
+    const plats=state.platforms;
+
+    if(mode==='equal'){
+      const eq=over/(plats.length||1);
+      plats.forEach(p=>r.overageAlloc[p]=eq);
+    } else if(mode==='prop'){
+      const baseSum=plats.reduce((s,p)=>s+(Math.max(0,r.bases[p]||0)),0);
+      if(baseSum>0) plats.forEach(p=>r.overageAlloc[p]= over * (Math.max(0,r.bases[p]||0)/baseSum));
+      else { const eq=over/(plats.length||1); plats.forEach(p=>r.overageAlloc[p]=eq); }
+    } else if(mode==='weights'){
+      // try to read weights from original master rows? We merged into "suggested" already.
+      // Here we recompute based on closest-to-weights:
+      // If current suggestion already used weights initially, do nothing; otherwise equal
+      const sum= sumOverage(r.overageAlloc);
+      if(Math.abs(sum - over) < 0.005){
+        // keep as is
+      } else {
+        const eq=over/(plats.length||1); plats.forEach(p=>r.overageAlloc[p]=eq);
+      }
+    }
+    renderResults(document.getElementById('currency').value||'$');
+  }
+
+  // save
+  const save=e.target.getAttribute('data-ovr-save');
+  if(save){
+    const idx=Number(save.split('-')[1]);
+    const r=state.results[idx];
+    if(Math.abs(sumOverage(r.overageAlloc)-r.overage) >= 0.005){
+      alert('Overage entries must sum exactly to the overage.');
+      return;
+    }
+    r.saved=true;
+    // soft confirm
+    e.target.textContent='Saved ✓';
+    setTimeout(()=>{ renderResults(document.getElementById('currency').value||'$'); }, 600);
+  }
+});
+
+/*** Export ***/
+document.getElementById('btn-export-alloc').addEventListener('click',()=>{
+  const c=document.getElementById('currency').value||'$';
+  const rows=[];
+  state.results.forEach(r=>{
+    const baseNeeded = Object.values(r.bases).reduce((s,x)=>s+(x||0),0);
+    const objBase={}; const objOver={}; const objTotal={};
+    state.platforms.forEach(p=>{
+      objBase['Base_'+p]=(r.allocBase[p]||0);
+      objOver['Overage_'+p]=(r.overageAlloc[p]||0);
+      objTotal['Alloc_'+p]=(r.allocBase[p]||0)+(r.overageAlloc[p]||0);
+    });
+    rows.push({
+      CustomerID:r.id,
+      Period:r.period,
+      Transactions:r.txns,
+      TotalPaid:r.totalPaid,
+      BaseNeeded: baseNeeded,
+      Overage:r.overage,
+      ...objBase,
+      ...objOver,
+      ...objTotal
+    });
+  });
+  download('allocations.csv', toCSV(rows));
+});
+document.getElementById('btn-export-unmatched').addEventListener('click',()=>{
+  const rows=state.unmatched.map(u=>({
+    CustomerID:u.id, Period:u.period, Transactions:u.txns, TotalPaid:u.total
+  }));
+  download('unmatched.csv', toCSV(rows));
+});
+function toCSV(list){
+  if(!list.length) return '';
+  const headers=Object.keys(list[0]);
+  const esc=v=>'"'+String(v??'').replace(/"/g,'""')+'"';
+  const head=headers.map(esc).join(',');
+  const body=list.map(r=>headers.map(h=>esc(r[h])).join(',')).join('\n');
+  return head+'\n'+body;
+}
+function download(filename,text){
+  const blob=new Blob([text],{type:'text/csv;charset=utf-8;'});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a');
+  a.href=url;a.download=filename;a.click();
+  URL.revokeObjectURL(url);
+}
+</script>
+</body>
+</html>
